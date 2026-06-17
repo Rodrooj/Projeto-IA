@@ -9,6 +9,21 @@ from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLRO
 from sklearn.metrics import classification_report
 
 def main():
+    """
+    Script de Treinamento da Rede Neural de Tradução de LIBRAS.
+    
+    Responsabilidades deste script:
+    1. Carregar as anotações do dataset e mapear as top 10 classes mais frequentes.
+    2. Importar as sequências numpy (`.npy`) extraídas e aplicar as matrizes aumentadas 
+       (data augmentation: noise e scale).
+    3. Separar os dados em Treino e Validação com base no emissor ('Articulador3' vai para teste).
+    4. Definir a arquitetura da rede usando Keras:
+       - Uma LSTM Bidirecional para aprender a temporalidade de ida e volta.
+       - Dense Layer para redução da dimensionalidade.
+       - Softmax para a classificação multivariável.
+    5. Treinar usando EarlyStopping para evitar overfitting.
+    6. Exportar automaticamente o resultado final para `.tflite` para o Frontend React consumir.
+    """
     base_dir = r"c:\Users\Rodrigo\Downloads\Tradutor-Libras"
     dataset_dir = os.path.join(base_dir, "datasets", "V-LIBRASIL Dataset")
     features_dir = os.path.join(base_dir, "datasets", "features")
@@ -95,6 +110,7 @@ def main():
     print(f"Final Test shapes: X={X_test.shape}, y={y_test.shape}")
     
     # Model Definition & Training
+    # Utiliza paralelismo em GPUs (MirroredStrategy) se disponível, caso contrário usa CPU
     strategy = tf.distribute.MirroredStrategy() if len(tf.config.list_physical_devices('GPU')) > 1 else tf.distribute.get_strategy()
     
     with strategy.scope():
@@ -140,6 +156,8 @@ def main():
         print(classification_report(y_test, y_pred, target_names=target_names, labels=unique_labels_test))
     
     # Convert to TFLite
+    # Conversão explícita garantindo que as operações complexas como LSTMs
+    # sejam mantidas como Float32 se necessário para evitar erros de compatibilidade no client.
     print("Converting model to TFLite...")
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
     converter.optimizations = [tf.lite.Optimize.DEFAULT]

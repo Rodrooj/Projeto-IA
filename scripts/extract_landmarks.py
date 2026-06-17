@@ -16,7 +16,13 @@ FEATURES_PER_FRAME = 159 # 53 landmarks * 3 coords
 mp_holistic = mp.solutions.holistic
 
 def get_shoulder_center(landmarks):
-    """Calcula o ponto médio entre os ombros (landmarks 11 e 12 da pose)"""
+    """
+    Calcula o ponto médio entre os ombros (landmarks 11 e 12 da pose).
+    Usado para garantir a invariância espacial translacional no modelo de Deep Learning.
+    
+    Args:
+        landmarks: Objeto de landmarks retornado pelo processamento do MediaPipe.
+    """
     # Em mediapipe holistic, pose_landmarks 11 e 12 são os ombros
     if not landmarks.pose_landmarks:
         return np.array([0.0, 0.0, 0.0])
@@ -31,7 +37,15 @@ def get_shoulder_center(landmarks):
     return np.array([cx, cy, cz])
 
 def extract_features_from_results(results, origin):
-    """Extrai e normaliza espacialmente os 53 landmarks (159 valores)"""
+    """
+    Extrai e normaliza espacialmente os 53 landmarks (159 valores no total).
+    Normaliza as coordenadas subtraindo o baricentro (origin).
+    
+    Padrão adotado:
+    - 11 pontos do Tronco Superior
+    - 21 pontos da Mão Esquerda
+    - 21 pontos da Mão Direita
+    """
     features = []
     
     # 1. Pose (Apenas Tronco Superior: 11 a 24, mas vamos pegar os primeiros 11 principais ou mapear 11 específicos)
@@ -63,7 +77,14 @@ def extract_features_from_results(results, origin):
     return np.array(features)
 
 def process_video(video_path, output_path):
-    """Processa um vídeo, extrai landmarks, calcula deltas e salva em .npy"""
+    """
+    Processa um único vídeo do começo ao fim:
+    1. Lê frame a frame via OpenCV.
+    2. Aplica MediaPipe Holistic.
+    3. Normaliza e empacota os 159 atributos temporais.
+    4. Limita/padroniza as informações numa janela temporal de 30 frames cravados.
+    5. Salva o pacote em disco via numpy (.npy).
+    """
     try:
         if os.path.exists(output_path):
             return f"Já processado: {video_path}"

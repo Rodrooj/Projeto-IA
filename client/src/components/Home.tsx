@@ -2,6 +2,17 @@ import { Link } from 'react-router-dom';
 import { Sparkles, ArrowRight, ShieldCheck, Zap } from 'lucide-react';
 import './Home.css';
 
+/**
+ * Componente `Home`
+ * 
+ * Renderiza a página inicial (Landing Page) da aplicação.
+ * Destaca as principais características do projeto:
+ * - Baixa latência (inferência Edge)
+ * - Privacidade Total (processamento local no navegador)
+ * - Alta Precisão (via MediaPipe Holistic e normalização)
+ * 
+ * Contém um Call-to-Action (botão) para redirecionar o usuário para a rota `/translator`.
+ */
 export default function Home() {
   return (
     <div className="home-container">

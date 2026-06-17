@@ -15,6 +15,17 @@ import { extractAndNormalizeSpatial, FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME } f
 // URL Mock do modelo para o esqueleto, na vida real seria importado da public/
 const MODEL_URL = '/models/libras_model.tflite';
 
+/**
+ * Componente principal `LibrasTranslator`
+ * 
+ * Gerencia a lógica do pipeline do Tradutor de Libras:
+ * 1. Inicializa o Backend TFLite.
+ * 2. Captura imagens da Webcam (via MediaPipe Camera).
+ * 3. Identifica landmarks espaciais (via MediaPipe Holistic).
+ * 4. Acumula os landmarks temporais em um Buffer (tamanho = 30 frames).
+ * 5. Realiza a inferência com o modelo TFLite Híbrido CNN-1D + LSTM.
+ * 6. Dispara a síntese de voz (Web Speech API) caso a predição ultrapasse 70% de confiança.
+ */
 export default function LibrasTranslator() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -34,6 +45,10 @@ export default function LibrasTranslator() {
 
   const [classMapping, setClassMapping] = useState<Record<number, string>>({});
 
+  /**
+   * Efeito disparado na inicialização do componente para carregar 
+   * os requisitos do TensorFlow Lite e o modelo em memória local.
+   */
   useEffect(() => {
     // Inicialização do TensorFlow Lite Backend e Modelo
     const initModel = async () => {
@@ -64,6 +79,11 @@ export default function LibrasTranslator() {
     initModel();
   }, []);
 
+  /**
+   * Callback executado pelo MediaPipe a cada frame processado com sucesso.
+   * 
+   * @param results - O objeto contendo as posições tridimensionais do esqueleto e mãos.
+   */
   const onResults = (results: Results) => {
     // Desenhar Landmarks (opcional, foco na estética minimalista)
     const canvasCtx = canvasRef.current?.getContext('2d');
@@ -94,6 +114,11 @@ export default function LibrasTranslator() {
     }
   };
 
+  /**
+   * Executa a predição local utilizando a IA baseada em TensorFlow Lite.
+   * 
+   * @param sequence - Tensor contendo 30 frames temporais com 159 features matemáticas cada.
+   */
   const runInference = (sequence: number[][]) => {
     if (!tfliteModel.current) return;
     
@@ -127,6 +152,14 @@ export default function LibrasTranslator() {
     }
   };
 
+  /**
+   * Sintetiza o texto em formato de áudio (Text-to-Speech) caso
+   * o usuário mantenha o controle de voz ativado.
+   * Implementa também mecanismo de cooldown (3 segundos) para 
+   * evitar superposição (stuttering) da fala da mesma palavra seguidamente.
+   * 
+   * @param text - A palavra ou texto reconhecido na predição para sintetizar.
+   */
   const triggerVoice = (text: string) => {
     if (!isVoiceEnabled) return;
     
@@ -148,6 +181,11 @@ export default function LibrasTranslator() {
     }
   };
 
+  /**
+   * Liga ou desliga a instância da Câmera integrada com o MediaPipe Holistic.
+   * Recarrega a página ao desligar devido a restrições do cleanup padrão 
+   * da biblioteca mediapipe/camera_utils.
+   */
   const toggleCamera = () => {
     if (isCameraActive) {
       setIsCameraActive(false);

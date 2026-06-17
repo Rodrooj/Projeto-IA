@@ -16,6 +16,13 @@ FEATURES_PER_FRAME = 159
 global_holistic = None
 
 def worker_init():
+    """
+    Inicializa a instância global do MediaPipe Holistic para o worker atual.
+    
+    Como o MediaPipe pode consumir muita memória e vazar em ambientes de processamento 
+    maciçamente paralelo, instanciá-lo apenas uma vez por worker (processo filho) 
+    é uma boa prática de gestão de recursos do SO.
+    """
     global global_holistic
     global_holistic = mp_holistic.Holistic(
         min_detection_confidence=0.5,
@@ -24,6 +31,13 @@ def worker_init():
     )
 
 def get_shoulder_center(pose_landmarks):
+    """
+    Identifica o ponto central exato (baricentro) entre o ombro esquerdo e direito.
+    Esse ponto servirá como âncora `(0,0,0)` na normalização espacial geométrica.
+    
+    Args:
+        pose_landmarks: Lista de objetos tridimensionais do esqueleto vindos do MediaPipe.
+    """
     if not pose_landmarks or len(pose_landmarks.landmark) <= 12:
         return {'x': 0.0, 'y': 0.0, 'z': 0.0}
     
@@ -37,6 +51,14 @@ def get_shoulder_center(pose_landmarks):
     }
 
 def extract_and_normalize_spatial(results):
+    """
+    Extrai as informações tridimensionais do esqueleto detectado no vídeo.
+    Calcula a invariância à translação (subtraindo do centro dos ombros) e concatena
+    11 pontos da pose e os 21 pontos de cada mão para gerar um vetor numérico exato de 159 features.
+    
+    Args:
+        results: Resposta do MediaPipe a um frame individual processado.
+    """
     features = []
     origin = get_shoulder_center(results.pose_landmarks)
     
@@ -131,6 +153,12 @@ def worker(item):
     return success, video_name
 
 def main():
+    """
+    Ponto de entrada central.
+    Responsável por mapear o arquivo `annotations.csv` do dataset V-LIBRASIL, 
+    gerar tarefas para cada vídeo e orquestrar a extração em paralelo utilizando 
+    todos os núcleos lógicos (`multiprocessing.Pool`) da máquina.
+    """
     base_dir = r"c:\Users\Rodrigo\Downloads\Tradutor-Libras"
     dataset_dir = os.path.join(base_dir, "datasets", "V-LIBRASIL Dataset")
     output_dir = os.path.join(base_dir, "datasets", "features")

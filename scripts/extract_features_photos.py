@@ -64,6 +64,15 @@ def extract_and_normalize_spatial(results):
     return features
 
 def process_image(image_path, output_path):
+    """
+    Processa uma fotografia estática contendo o sinal de Libras.
+    
+    Como os datasets de fotos (LIBRAS Photo Dataset) não possuem temporalidade (vídeo), 
+    ele extrai os landmarks da foto usando `static_image_mode=True` no MediaPipe.
+    Após obter o vetor de 159 features, ele o "clona" 30 vezes (`[features] * 30`) para simular
+    uma janela temporal estática. Isso permite que a rede neural (LSTM) engula esses dados
+    exatamente no mesmo formato em que consome os dados de vídeo real.
+    """
     if os.path.exists(output_path):
         return True
         
@@ -96,6 +105,11 @@ def worker(item):
     return success
 
 def main():
+    """
+    Script dedicado à extração de matrizes numpy para datasets de fotografias.
+    Navega recursivamente nos splits de 'train' e 'test', despachando o processamento
+    em lote em Process Pools para acelerar a mineração de dados em milhares de imagens.
+    """
     base_dir = r"c:\Users\Rodrigo\Downloads\Tradutor-Libras"
     dataset_dir = os.path.join(base_dir, "datasets", "LIBRAS Photo Dataset")
     output_dir = os.path.join(base_dir, "datasets", "features_photos")

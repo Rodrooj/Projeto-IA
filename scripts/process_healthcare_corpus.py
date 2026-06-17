@@ -11,6 +11,14 @@ ANNOTATIONS_DIR = DATASET_DIR / "annotations"
 OUTPUT_DIR = DATASET_DIR / "extracted_clips"
 
 def process_segment(row):
+    """
+    Função de trabalhador (Worker) para cortar clipes individuais a partir de um vídeo longo.
+    
+    Ele lê os timestamps de início (`start_time`) e fim (`end_time`) contidos na
+    planilha CSV de anotações (oriundas do corpus clínico).
+    Usando a biblioteca `moviepy`, realiza o "Trim" do vídeo longo e exporta um MP4 mais curto
+    comprimido via `libx264` agrupado em pastas conforme seu significado (`target_gloss`).
+    """
     try:
         segment_id = row['segment_id']
         video_file = row['video_file']
@@ -60,6 +68,14 @@ def process_segment(row):
         return f"Erro crítico {row.get('segment_id', 'Unknown')}: {e}"
 
 def main():
+    """
+    Ponto de entrada do script de particionamento do Healthcare Corpus.
+    
+    Diferente de datasets já picotados (como o V-LIBRASIL), o corpus clínico vem 
+    em vídeos inteiros de consulta (longos). Este script lê o dicionário de tempos 
+    (segments.csv) e orquestra workers usando `ProcessPoolExecutor` para extrair
+    os mini-clipes relevantes.
+    """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     csv_path = ANNOTATIONS_DIR / "segments.csv"
     

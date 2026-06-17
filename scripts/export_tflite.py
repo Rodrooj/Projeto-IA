@@ -11,7 +11,18 @@ FRAMES = 30
 FEATURES = 159
 
 def representative_dataset_gen():
-    """Gera um dataset representativo para calibração da quantização INT8"""
+    """
+    Função Geradora (Generator) para a quantização representativa INT8.
+    
+    A quantização INT8 diminui drasticamente o peso e a latência de inferência
+    do modelo convertendo pontos flutuantes de 32-bits (Float32) para Inteiros de 8-bits.
+    No entanto, para evitar perda de precisão absurda, a rede neural precisa de uma amostra
+    representativa dos dados (algumas sequências do dataset original) para mapear corretamente 
+    a distribuição de ativações (min e max) em sua nova faixa comprimida de 8-bits.
+    
+    Yields:
+        list: Uma sequência calibradora contendo tensores do tamanho da entrada do modelo.
+    """
     from glob import glob
     # Pega uma amostra de 100 sequencias para calibração
     search_pattern = str(PROCESSED_DIR / "**" / "*.npy")
@@ -27,6 +38,17 @@ def representative_dataset_gen():
             yield [data]
 
 def main():
+    """
+    Ponto de entrada do script.
+    
+    Este script é o passo final no pipeline de Machine Learning, onde o modelo pesado (.h5) 
+    treinado via Keras é reduzido e empacotado para o formato TensorFlow Lite (.tflite), 
+    visando sua integração direta no Frontend React com o módulo `@tensorflow/tfjs-tflite`.
+    
+    Ele carrega o modelo Keras e aplica a classe `TFLiteConverter` otimizando os pesos 
+    pela heurística `tf.lite.Optimize.DEFAULT` (Dynamic Range Quantization). Caso o fallback seja 
+    ativado, ele garantirá que o frontend conseguirá ler usando `TFLITE_BUILTINS`.
+    """
     model_path = MODEL_DIR / "best_model.h5"
     if not model_path.exists():
         print(f"Modelo não encontrado: {model_path}")
