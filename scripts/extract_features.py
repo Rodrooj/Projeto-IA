@@ -3,14 +3,14 @@ import mediapipe as mp
 import numpy as np
 import pandas as pd
 import os
-import glob
 import multiprocessing
 from tqdm import tqdm
+from common import (
+    get_base_dir, get_shoulder_center, extract_and_normalize_spatial,
+    pad_sequence, FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME
+)
 
 mp_holistic = mp.solutions.holistic
-
-FRAMES_PER_SEQUENCE = 30
-FEATURES_PER_FRAME = 159
 
 # Global per-worker holistic instance
 global_holistic = None
@@ -30,63 +30,6 @@ def worker_init():
         model_complexity=1
     )
 
-def get_shoulder_center(pose_landmarks):
-    """
-    Identifica o ponto central exato (baricentro) entre o ombro esquerdo e direito.
-    Esse ponto servirá como âncora `(0,0,0)` na normalização espacial geométrica.
-    
-    Args:
-        pose_landmarks: Lista de objetos tridimensionais do esqueleto vindos do MediaPipe.
-    """
-    if not pose_landmarks or len(pose_landmarks.landmark) <= 12:
-        return {'x': 0.0, 'y': 0.0, 'z': 0.0}
-    
-    l_shoulder = pose_landmarks.landmark[11]
-    r_shoulder = pose_landmarks.landmark[12]
-    
-    return {
-        'x': (l_shoulder.x + r_shoulder.x) / 2.0,
-        'y': (l_shoulder.y + r_shoulder.y) / 2.0,
-        'z': (l_shoulder.z + r_shoulder.z) / 2.0,
-    }
-
-def extract_and_normalize_spatial(results):
-    """
-    Extrai as informações tridimensionais do esqueleto detectado no vídeo.
-    Calcula a invariância à translação (subtraindo do centro dos ombros) e concatena
-    11 pontos da pose e os 21 pontos de cada mão para gerar um vetor numérico exato de 159 features.
-    
-    Args:
-        results: Resposta do MediaPipe a um frame individual processado.
-    """
-    features = []
-    origin = get_shoulder_center(results.pose_landmarks)
-    
-    pose_indices = [11, 12, 13, 14, 15, 16, 23, 24, 19, 20, 21]
-    if results.pose_landmarks:
-        for idx in pose_indices:
-            if idx < len(results.pose_landmarks.landmark):
-                lm = results.pose_landmarks.landmark[idx]
-                features.extend([lm.x - origin['x'], lm.y - origin['y'], lm.z - origin['z']])
-            else:
-                features.extend([0.0, 0.0, 0.0])
-    else:
-        features.extend([0.0] * (11 * 3))
-        
-    if results.left_hand_landmarks:
-        for lm in results.left_hand_landmarks.landmark:
-            features.extend([lm.x - origin['x'], lm.y - origin['y'], lm.z - origin['z']])
-    else:
-        features.extend([0.0] * (21 * 3))
-        
-    if results.right_hand_landmarks:
-        for lm in results.right_hand_landmarks.landmark:
-            features.extend([lm.x - origin['x'], lm.y - origin['y'], lm.z - origin['z']])
-    else:
-        features.extend([0.0] * (21 * 3))
-        
-    return features
-
 def process_video(video_path, output_path):
     if os.path.exists(output_path):
         return True # Already processed
@@ -102,7 +45,7 @@ def process_video(video_path, output_path):
         cap.release()
         return False
         
-    # Determine which frames to sample
+    # Determine which frames to sample (amostragem uniforme)
     if total_frames >= FRAMES_PER_SEQUENCE:
         indices = np.linspace(0, total_frames - 1, FRAMES_PER_SEQUENCE, dtype=int)
     else:
@@ -127,15 +70,13 @@ def process_video(video_path, output_path):
             
     cap.release()
     
-    seq_len = len(frames_features)
-    if seq_len == 0:
+    if len(frames_features) == 0:
         return False
-        
-    final_sequence = frames_features.copy()
-    while len(final_sequence) < FRAMES_PER_SEQUENCE:
-        final_sequence.append([0.0] * FEATURES_PER_FRAME)
+    
+    # Padding consistente: repete o último frame (melhor para dados gestuais)
+    final_sequence = pad_sequence(frames_features, pad_mode='repeat_last')
             
-    np.save(output_path, np.array(final_sequence, dtype=np.float32))
+    np.save(output_path, final_sequence)
     return True
 
 def worker(item):
@@ -159,7 +100,7 @@ def main():
     gerar tarefas para cada vídeo e orquestrar a extração em paralelo utilizando 
     todos os núcleos lógicos (`multiprocessing.Pool`) da máquina.
     """
-    base_dir = r"c:\Users\Rodrigo\Downloads\Tradutor-Libras"
+    base_dir = get_base_dir()
     dataset_dir = os.path.join(base_dir, "datasets", "V-LIBRASIL Dataset")
     output_dir = os.path.join(base_dir, "datasets", "features")
     
@@ -184,4 +125,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

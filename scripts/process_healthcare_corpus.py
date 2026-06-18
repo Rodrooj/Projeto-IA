@@ -3,9 +3,11 @@ import csv
 from moviepy import VideoFileClip
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
+from common import get_base_dir
 
-# Diretórios
-DATASET_DIR = Path("../datasets/Healthcare Corpus Dataset")
+# Diretórios — usa caminhos relativos ao projeto
+BASE_DIR = get_base_dir()
+DATASET_DIR = BASE_DIR / "datasets" / "Healthcare Corpus Dataset"
 VIDEOS_DIR = DATASET_DIR / "videos"
 ANNOTATIONS_DIR = DATASET_DIR / "annotations"
 OUTPUT_DIR = DATASET_DIR / "extracted_clips"

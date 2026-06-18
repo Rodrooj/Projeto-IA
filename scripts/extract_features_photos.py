@@ -4,9 +4,10 @@ import os
 import glob
 import multiprocessing
 from tqdm import tqdm
-
-FRAMES_PER_SEQUENCE = 30
-FEATURES_PER_FRAME = 159
+from common import (
+    get_base_dir, extract_and_normalize_spatial,
+    FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME
+)
 
 global_holistic = None
 
@@ -20,48 +21,6 @@ def worker_init():
         min_tracking_confidence=0.5,
         model_complexity=1
     )
-
-def get_shoulder_center(pose_landmarks):
-    if not pose_landmarks or len(pose_landmarks.landmark) <= 12:
-        return {'x': 0.0, 'y': 0.0, 'z': 0.0}
-    
-    l_shoulder = pose_landmarks.landmark[11]
-    r_shoulder = pose_landmarks.landmark[12]
-    
-    return {
-        'x': (l_shoulder.x + r_shoulder.x) / 2.0,
-        'y': (l_shoulder.y + r_shoulder.y) / 2.0,
-        'z': (l_shoulder.z + r_shoulder.z) / 2.0,
-    }
-
-def extract_and_normalize_spatial(results):
-    features = []
-    origin = get_shoulder_center(results.pose_landmarks)
-    
-    pose_indices = [11, 12, 13, 14, 15, 16, 23, 24, 19, 20, 21]
-    if results.pose_landmarks:
-        for idx in pose_indices:
-            if idx < len(results.pose_landmarks.landmark):
-                lm = results.pose_landmarks.landmark[idx]
-                features.extend([lm.x - origin['x'], lm.y - origin['y'], lm.z - origin['z']])
-            else:
-                features.extend([0.0, 0.0, 0.0])
-    else:
-        features.extend([0.0] * (11 * 3))
-        
-    if results.left_hand_landmarks:
-        for lm in results.left_hand_landmarks.landmark:
-            features.extend([lm.x - origin['x'], lm.y - origin['y'], lm.z - origin['z']])
-    else:
-        features.extend([0.0] * (21 * 3))
-        
-    if results.right_hand_landmarks:
-        for lm in results.right_hand_landmarks.landmark:
-            features.extend([lm.x - origin['x'], lm.y - origin['y'], lm.z - origin['z']])
-    else:
-        features.extend([0.0] * (21 * 3))
-        
-    return features
 
 def process_image(image_path, output_path):
     """
@@ -87,10 +46,9 @@ def process_image(image_path, output_path):
     
     # We only process if hands are detected, to ensure quality data
     if not results.left_hand_landmarks and not results.right_hand_landmarks:
-        # If we can't see hands in a photo dataset of letters, it's probably a bad crop or empty
-        # but let's just save zeros or skip it. Let's skip.
         return False
-        
+    
+    # Usa função compartilhada de common.py
     features = extract_and_normalize_spatial(results)
     
     # Duplicate features 30 times
@@ -110,7 +68,7 @@ def main():
     Navega recursivamente nos splits de 'train' e 'test', despachando o processamento
     em lote em Process Pools para acelerar a mineração de dados em milhares de imagens.
     """
-    base_dir = r"c:\Users\Rodrigo\Downloads\Tradutor-Libras"
+    base_dir = get_base_dir()
     dataset_dir = os.path.join(base_dir, "datasets", "LIBRAS Photo Dataset")
     output_dir = os.path.join(base_dir, "datasets", "features_photos")
     

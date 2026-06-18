@@ -4,9 +4,14 @@ import csv
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization, Bidirectional, SpatialDropout1D, GaussianNoise
+from tensorflow.keras.layers import (
+    LSTM, Dense, Dropout, BatchNormalization, Bidirectional,
+    SpatialDropout1D, GaussianNoise, Conv1D
+)
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 from sklearn.metrics import classification_report
+from sklearn.utils.class_weight import compute_class_weight
+from common import get_base_dir, FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME
 
 def main():
     """
@@ -15,16 +20,13 @@ def main():
     Responsabilidades deste script:
     1. Carregar as anotações do dataset e mapear as top 10 classes mais frequentes.
     2. Importar as sequências numpy (`.npy`) extraídas e aplicar as matrizes aumentadas 
-       (data augmentation: noise e scale).
+       (data augmentation: noise, scale, temporal, mirror).
     3. Separar os dados em Treino e Validação com base no emissor ('Articulador3' vai para teste).
-    4. Definir a arquitetura da rede usando Keras:
-       - Uma LSTM Bidirecional para aprender a temporalidade de ida e volta.
-       - Dense Layer para redução da dimensionalidade.
-       - Softmax para a classificação multivariável.
-    5. Treinar usando EarlyStopping para evitar overfitting.
+    4. Definir a arquitetura CNN-1D + BiLSTM conforme documentação técnica.
+    5. Treinar usando EarlyStopping e class weights para combater desbalanceamento.
     6. Exportar automaticamente o resultado final para `.tflite` para o Frontend React consumir.
     """
-    base_dir = r"c:\Users\Rodrigo\Downloads\Tradutor-Libras"
+    base_dir = get_base_dir()
     dataset_dir = os.path.join(base_dir, "datasets", "V-LIBRASIL Dataset")
     features_dir = os.path.join(base_dir, "datasets", "features")
     models_dir = os.path.join(base_dir, "client", "public", "models")
@@ -73,6 +75,9 @@ def main():
     X_train, y_train = [], []
     X_test, y_test = [], []
     
+    # Sufixos de augmentation reconhecidos pelo pipeline
+    AUG_SUFFIXES = ['_aug_noise', '_aug_scale', '_aug_temporal', '_aug_mirror']
+    
     print("Loading Video feature arrays...")
     for row in df_valid:
         npy_path = os.path.join(features_dir, row['video_name'].replace('.mp4', '.npy'))
@@ -86,16 +91,12 @@ def main():
             X_train.append(features)
             y_train.append(label)
             
-            # Load augmented data
-            noisy_path = npy_path.replace('.npy', '_aug_noise.npy')
-            if os.path.exists(noisy_path):
-                X_train.append(np.load(noisy_path))
-                y_train.append(label)
-                
-            scaled_path = npy_path.replace('.npy', '_aug_scale.npy')
-            if os.path.exists(scaled_path):
-                X_train.append(np.load(scaled_path))
-                y_train.append(label)
+            # Load all augmented variants
+            for suffix in AUG_SUFFIXES:
+                aug_path = npy_path.replace('.npy', f'{suffix}.npy')
+                if os.path.exists(aug_path):
+                    X_train.append(np.load(aug_path))
+                    y_train.append(label)
             
     X_train = np.array(X_train)
     y_train = np.array(y_train)
@@ -109,21 +110,44 @@ def main():
     print(f"Final Train shapes: X={X_train.shape}, y={y_train.shape}")
     print(f"Final Test shapes: X={X_test.shape}, y={y_test.shape}")
     
+    # Compute class weights para combater desbalanceamento entre classes
+    unique_classes = np.unique(y_train)
+    class_weights = compute_class_weight('balanced', classes=unique_classes, y=y_train)
+    class_weight_dict = dict(zip(unique_classes.astype(int), class_weights))
+    print(f"Class weights: {class_weight_dict}")
+    
     # Model Definition & Training
     # Utiliza paralelismo em GPUs (MirroredStrategy) se disponível, caso contrário usa CPU
     strategy = tf.distribute.MirroredStrategy() if len(tf.config.list_physical_devices('GPU')) > 1 else tf.distribute.get_strategy()
     
     with strategy.scope():
         model = Sequential([
-            tf.keras.layers.Input(batch_shape=(1, 30, 159)),
-            Bidirectional(LSTM(64, return_sequences=False, activation='relu', unroll=True)),
-            Dropout(0.2),
-            Dense(32, activation='relu'),
+            # Input com shape dinâmico (batch_size livre) ao invés de batch_shape=(1,...)
+            # que travava o batch_size em 1 e tornava o treinamento ~32× mais lento.
+            tf.keras.layers.Input(shape=(FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME)),
+            
+            # Bloco CNN-1D: captura padrões espaciais locais (posições dos dedos)
+            # antes da LSTM processar a dinâmica temporal.
+            Conv1D(64, kernel_size=3, activation='relu', padding='same'),
+            BatchNormalization(),
+            Conv1D(64, kernel_size=3, activation='relu', padding='same'),
+            BatchNormalization(),
+            SpatialDropout1D(0.2),
+            
+            # Bloco LSTM Bidirecional: aprende temporalidade em ambas as direções
+            Bidirectional(LSTM(128, return_sequences=True)),
+            Bidirectional(LSTM(64, return_sequences=False)),
+            
+            # Classificador
+            Dropout(0.3),
+            Dense(64, activation='relu'),
             Dense(num_classes, activation='softmax')
         ])
         
         optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
         model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+        
+    model.summary()
         
     callbacks = [
         EarlyStopping(monitor='val_accuracy', patience=30, restore_best_weights=True),
@@ -144,7 +168,8 @@ def main():
         train_dataset,
         validation_data=test_dataset,
         epochs=150,
-        callbacks=callbacks
+        callbacks=callbacks,
+        class_weight=class_weight_dict
     )
     
     print("Evaluating on test set...")
@@ -158,8 +183,30 @@ def main():
     # Convert to TFLite
     # Conversão explícita garantindo que as operações complexas como LSTMs
     # sejam mantidas como Float32 se necessário para evitar erros de compatibilidade no client.
+    # ERRO COMUM: TFLite (TensorListReserve) requer batch_size estático para LSTMs.
+    # Solução: Recriar o modelo com batch_shape fixo = 1 e carregar os pesos treinados.
+    print("Rebuilding model with static batch size for TFLite conversion...")
+    
+    temp_weights_path = os.path.join(models_dir, 'temp_weights.weights.h5')
+    model.save_weights(temp_weights_path)
+    
+    tflite_model_keras = Sequential([
+        tf.keras.layers.Input(batch_shape=(1, FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME)),
+        Conv1D(64, kernel_size=3, activation='relu', padding='same'),
+        BatchNormalization(),
+        Conv1D(64, kernel_size=3, activation='relu', padding='same'),
+        BatchNormalization(),
+        SpatialDropout1D(0.2),
+        Bidirectional(LSTM(128, return_sequences=True)),
+        Bidirectional(LSTM(64, return_sequences=False)),
+        Dropout(0.3),
+        Dense(64, activation='relu'),
+        Dense(num_classes, activation='softmax')
+    ])
+    tflite_model_keras.load_weights(temp_weights_path)
+    
     print("Converting model to TFLite...")
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    converter = tf.lite.TFLiteConverter.from_keras_model(tflite_model_keras)
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
     converter.target_spec.supported_types = [tf.float32]
     tflite_model = converter.convert()
@@ -167,6 +214,10 @@ def main():
     tflite_path = os.path.join(models_dir, 'libras_model.tflite')
     with open(tflite_path, 'wb') as f:
         f.write(tflite_model)
+        
+    # Clean up temporary weights
+    if os.path.exists(temp_weights_path):
+        os.remove(temp_weights_path)
         
     print(f"TFLite model saved to {tflite_path}!")
 

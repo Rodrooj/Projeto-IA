@@ -3,8 +3,6 @@ import '@mediapipe/camera_utils';
 import '@mediapipe/holistic';
 import type { Results } from '@mediapipe/holistic';
 
-const CameraClass = (window as any).Camera;
-const HolisticClass = (window as any).Holistic;
 import * as tflite from '@tensorflow/tfjs-tflite';
 import * as tf from '@tensorflow/tfjs-core';
 import '@tensorflow/tfjs-backend-cpu';
@@ -12,8 +10,15 @@ import { Volume2, VolumeX, Video, VideoOff, Home } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { extractAndNormalizeSpatial, FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME } from '../lib/libras';
 
-// URL Mock do modelo para o esqueleto, na vida real seria importado da public/
+// URL do modelo TFLite para inferência no navegador
 const MODEL_URL = '/models/libras_model.tflite';
+
+/**
+ * Frequência de inferência: executa a predição a cada N frames processados pelo MediaPipe.
+ * Com a câmera a ~30fps, INFERENCE_EVERY_N_FRAMES=5 resulta em ~6 inferências/segundo,
+ * um equilíbrio entre responsividade e performance do navegador.
+ */
+const INFERENCE_EVERY_N_FRAMES = 5;
 
 /**
  * Componente principal `LibrasTranslator`
@@ -22,8 +27,8 @@ const MODEL_URL = '/models/libras_model.tflite';
  * 1. Inicializa o Backend TFLite.
  * 2. Captura imagens da Webcam (via MediaPipe Camera).
  * 3. Identifica landmarks espaciais (via MediaPipe Holistic).
- * 4. Acumula os landmarks temporais em um Buffer (tamanho = 30 frames).
- * 5. Realiza a inferência com o modelo TFLite Híbrido CNN-1D + LSTM.
+ * 4. Acumula os landmarks temporais em um Buffer Circular (tamanho = 30 frames).
+ * 5. Realiza a inferência throttled com o modelo TFLite Híbrido CNN-1D + LSTM.
  * 6. Dispara a síntese de voz (Web Speech API) caso a predição ultrapasse 70% de confiança.
  */
 export default function LibrasTranslator() {
@@ -39,18 +44,46 @@ export default function LibrasTranslator() {
 
   // Instâncias mantidas no componente
   const tfliteModel = useRef<tflite.TFLiteModel | null>(null);
-  const sequenceBuffer = useRef<number[][]>([]);
+  
+  /**
+   * Buffer Circular para sequências temporais — O(1) por inserção
+   * ao invés de O(n) do Array.shift() anterior.
+   * O writeIndex avança circularmente e frameCount rastreia o preenchimento.
+   */
+  const sequenceBuffer = useRef<(number[] | null)[]>(new Array(FRAMES_PER_SEQUENCE).fill(null));
+  const bufferWriteIndex = useRef(0);
+  const bufferFrameCount = useRef(0);
+  
   const lastSpoken = useRef<string>('');
   const speakTimeout = useRef<number | null>(null);
+  const inferenceCounter = useRef(0);
+  
+  /**
+   * Refs "espelho" para evitar closures obsoletas.
+   * O MediaPipe captura onResults uma única vez; estes refs garantem
+   * que as funções sempre acessem o valor mais recente do estado.
+   */
+  const isVoiceEnabledRef = useRef(isVoiceEnabled);
+  const classMappingRef = useRef<Record<number, string>>({});
+  
+  /**
+   * Instâncias de câmera e holistic armazenadas para cleanup programático
+   * sem necessidade de window.location.reload().
+   */
+  const cameraRef = useRef<any>(null);
+  const holisticRef = useRef<any>(null);
 
   const [classMapping, setClassMapping] = useState<Record<number, string>>({});
+
+  // Sincroniza refs com o estado React a cada atualização
+  useEffect(() => { isVoiceEnabledRef.current = isVoiceEnabled; }, [isVoiceEnabled]);
+  useEffect(() => { classMappingRef.current = classMapping; }, [classMapping]);
 
   /**
    * Efeito disparado na inicialização do componente para carregar 
    * os requisitos do TensorFlow Lite e o modelo em memória local.
    */
   useEffect(() => {
-    // Inicialização do TensorFlow Lite Backend e Modelo
     const initModel = async () => {
       try {
         // Para tfjs-tflite funcionar no navegador
@@ -80,88 +113,34 @@ export default function LibrasTranslator() {
   }, []);
 
   /**
-   * Callback executado pelo MediaPipe a cada frame processado com sucesso.
-   * 
-   * @param results - O objeto contendo as posições tridimensionais do esqueleto e mãos.
+   * Recupera o conteúdo do buffer circular em ordem temporal correta.
+   * Necessário porque o buffer circular escreve em posições arbitrárias;
+   * a leitura precisa reconstruir a sequência cronológica para a LSTM.
    */
-  const onResults = (results: Results) => {
-    // Desenhar Landmarks (opcional, foco na estética minimalista)
-    const canvasCtx = canvasRef.current?.getContext('2d');
-    if (canvasCtx && canvasRef.current && videoRef.current) {
-      canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-      // Aqui poderíamos usar drawConnectors do mediapipe/drawing_utils
+  const getOrderedBuffer = (): number[][] => {
+    const buf = sequenceBuffer.current;
+    const result: number[][] = [];
+    const oldestIdx = bufferWriteIndex.current % FRAMES_PER_SEQUENCE;
+    for (let i = 0; i < FRAMES_PER_SEQUENCE; i++) {
+      const idx = (oldestIdx + i) % FRAMES_PER_SEQUENCE;
+      result.push(buf[idx] || new Array(FEATURES_PER_FRAME).fill(0));
     }
-
-    if (!results.poseLandmarks) {
-      // Ignora frames sem detecção de pessoa
-      return;
-    }
-
-    // Engenharia de atributos (Espacial)
-    const features = extractAndNormalizeSpatial(results);
-    
-    // Adiciona ao Buffer Temporal
-    sequenceBuffer.current.push(features);
-
-    // Mantém o tamanho do buffer exatamente em FRAMES_PER_SEQUENCE (30 frames)
-    if (sequenceBuffer.current.length > FRAMES_PER_SEQUENCE) {
-      sequenceBuffer.current.shift();
-    }
-
-    // Inferência
-    if (sequenceBuffer.current.length === FRAMES_PER_SEQUENCE && tfliteModel.current) {
-      runInference(sequenceBuffer.current);
-    }
-  };
-
-  /**
-   * Executa a predição local utilizando a IA baseada em TensorFlow Lite.
-   * 
-   * @param sequence - Tensor contendo 30 frames temporais com 159 features matemáticas cada.
-   */
-  const runInference = (sequence: number[][]) => {
-    if (!tfliteModel.current) return;
-    
-    try {
-      tf.tidy(() => {
-         // Formato esperado: [1, 30, 159]
-        const inputTensor = tf.tensor3d([sequence], [1, FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME], 'float32');
-        
-        // Predict
-        const outputTensor = tfliteModel.current!.predict(inputTensor) as any;
-        const predictionsArray = outputTensor.dataSync();
-        
-        // Obter Classe
-        const maxConfidence = Math.max(...predictionsArray);
-        const predictedClassIdx = predictionsArray.indexOf(maxConfidence);
-        const predictedText = classMapping[predictedClassIdx] || "Desconhecido";
-        
-        console.log(`Predição: ${predictedText} (${maxConfidence.toFixed(2)})`, predictionsArray);
-
-        setPrediction(predictedText);
-        setConfidence(maxConfidence);
-        
-        // Mitigação de Mode Collapse (Confidence > 70%) para a voz
-        if (maxConfidence > 0.7) {
-          // Synthesis
-          triggerVoice(predictedText);
-        }
-      });
-    } catch (e) {
-      console.error("Erro na inferência", e);
-    }
+    return result;
   };
 
   /**
    * Sintetiza o texto em formato de áudio (Text-to-Speech) caso
    * o usuário mantenha o controle de voz ativado.
-   * Implementa também mecanismo de cooldown (3 segundos) para 
-   * evitar superposição (stuttering) da fala da mesma palavra seguidamente.
+   * Implementa mecanismo de cooldown (3 segundos) para 
+   * evitar superposição (stuttering) da fala.
+   * 
+   * Usa isVoiceEnabledRef para acessar o estado atual sem depender de closures.
    * 
    * @param text - A palavra ou texto reconhecido na predição para sintetizar.
    */
   const triggerVoice = (text: string) => {
-    if (!isVoiceEnabled) return;
+    // Acessa ref ao invés do state para evitar closure obsoleta
+    if (!isVoiceEnabledRef.current) return;
     
     // Evita repetição insana em curtos períodos
     if (lastSpoken.current === text) return;
@@ -182,18 +161,156 @@ export default function LibrasTranslator() {
   };
 
   /**
+   * Executa a predição local utilizando a IA baseada em TensorFlow Lite.
+   * 
+   * Melhorias sobre a versão anterior:
+   * - Usa `outputTensor.data()` (async) ao invés de `dataSync()` bloqueante.
+   * - Usa argmax manual ao invés de `Math.max(...spread)` para evitar
+   *   stack overflow com muitas classes.
+   * - Libera tensores manualmente (tf.tidy não suporta funções async).
+   * 
+   * @param sequence - Array de 30 frames temporais com 159 features matemáticas cada.
+   */
+  const runInference = async (sequence: number[][]) => {
+    if (!tfliteModel.current) return;
+    
+    let inputTensor: tf.Tensor | null = null;
+    try {
+      // Formato esperado: [1, 30, 159]
+      inputTensor = tf.tensor3d([sequence], [1, FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME], 'float32');
+      
+      // Predict
+      const outputTensor = tfliteModel.current.predict(inputTensor) as tf.Tensor;
+      // Async data() ao invés de dataSync() — não bloqueia a thread principal
+      const predictionsArray = await outputTensor.data();
+      
+      // Argmax manual — seguro para qualquer quantidade de classes,
+      // ao invés de Math.max(...predictionsArray) que copia para a call stack
+      let maxConf = -Infinity;
+      let predIdx = 0;
+      for (let i = 0; i < predictionsArray.length; i++) {
+        if (predictionsArray[i] > maxConf) {
+          maxConf = predictionsArray[i];
+          predIdx = i;
+        }
+      }
+      
+      // Usa ref ao invés de state para evitar closure obsoleta
+      const currentMapping = classMappingRef.current;
+      const predictedText = currentMapping[predIdx] || "Desconhecido";
+      
+      console.log(`Predição: ${predictedText} (${maxConf.toFixed(2)})`);
+
+      setPrediction(predictedText);
+      setConfidence(maxConf);
+      
+      // Mitigação de Mode Collapse (Confidence > 70%) para a voz
+      if (maxConf > 0.7) {
+        triggerVoice(predictedText);
+      }
+      
+      // Libera tensores manualmente (tf.tidy não suporta async)
+      outputTensor.dispose();
+    } catch (e) {
+      console.error("Erro na inferência", e);
+    } finally {
+      inputTensor?.dispose();
+    }
+  };
+
+  /**
+   * Callback executado pelo MediaPipe a cada frame processado com sucesso.
+   * 
+   * Usa buffer circular para O(1) e inferência throttled para performance.
+   * Todas as dependências são acessadas via refs, então esta função é segura
+   * mesmo quando capturada pela instância do MediaPipe Holistic.
+   * 
+   * @param results - O objeto contendo as posições tridimensionais do esqueleto e mãos.
+   */
+  const onResults = (results: Results) => {
+    // Desenhar Landmarks (opcional, foco na estética minimalista)
+    const canvasCtx = canvasRef.current?.getContext('2d');
+    if (canvasCtx && canvasRef.current) {
+      canvasCtx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
+
+    if (!results.poseLandmarks) {
+      // Ignora frames sem detecção de pessoa
+      return;
+    }
+
+    // Engenharia de atributos (Espacial)
+    const features = extractAndNormalizeSpatial(results);
+    
+    // Inserção no buffer circular: O(1) ao invés de Array.shift() O(n)
+    const writeIdx = bufferWriteIndex.current % FRAMES_PER_SEQUENCE;
+    sequenceBuffer.current[writeIdx] = features;
+    bufferWriteIndex.current++;
+    bufferFrameCount.current = Math.min(bufferFrameCount.current + 1, FRAMES_PER_SEQUENCE);
+
+    // Inferência throttled: executa apenas a cada N frames para não sobrecarregar o navegador
+    inferenceCounter.current++;
+    if (
+      bufferFrameCount.current >= FRAMES_PER_SEQUENCE &&
+      tfliteModel.current &&
+      inferenceCounter.current % INFERENCE_EVERY_N_FRAMES === 0
+    ) {
+      const orderedSequence = getOrderedBuffer();
+      runInference(orderedSequence);
+    }
+  };
+
+  /**
    * Liga ou desliga a instância da Câmera integrada com o MediaPipe Holistic.
-   * Recarrega a página ao desligar devido a restrições do cleanup padrão 
-   * da biblioteca mediapipe/camera_utils.
+   * 
+   * Substituído o `window.location.reload()` por cleanup programático:
+   * - `camera.stop()` para parar a captura
+   * - Revogação dos MediaStream tracks
+   * - `holistic.close()` para liberar recursos do MediaPipe
+   * Isso preserva o modelo TFLite carregado e o contexto do usuário.
    */
   const toggleCamera = () => {
     if (isCameraActive) {
+      // Cleanup programático sem reload — preserva o modelo carregado
+      try {
+        cameraRef.current?.stop();
+        // Revoga os MediaStream tracks do navegador
+        const stream = videoRef.current?.srcObject as MediaStream | null;
+        stream?.getTracks().forEach(track => track.stop());
+        if (videoRef.current) {
+          videoRef.current.srcObject = null;
+        }
+        holisticRef.current?.close();
+      } catch (e) {
+        console.warn("Erro ao parar câmera/holistic:", e);
+      }
+      
+      cameraRef.current = null;
+      holisticRef.current = null;
+      
+      // Reset do buffer circular
+      sequenceBuffer.current = new Array(FRAMES_PER_SEQUENCE).fill(null);
+      bufferWriteIndex.current = 0;
+      bufferFrameCount.current = 0;
+      inferenceCounter.current = 0;
+      
       setIsCameraActive(false);
-      window.location.reload(); // Hard reset por limitações do MediaPipe Camera
+      setPrediction('');
+      setConfidence(0);
       return;
     }
 
     if (!videoRef.current) return;
+
+    // Verifica se as bibliotecas MediaPipe estão disponíveis globalmente
+    const CameraClass = (window as any).Camera;
+    const HolisticClass = (window as any).Holistic;
+    
+    if (!CameraClass || !HolisticClass) {
+      setErrorMsg("Erro: Bibliotecas do MediaPipe não carregaram. Verifique sua conexão com a internet.");
+      console.error("MediaPipe Camera or Holistic not found on window object");
+      return;
+    }
 
     try {
       const holistic = new HolisticClass({
@@ -211,6 +328,7 @@ export default function LibrasTranslator() {
       });
 
       holistic.onResults(onResults);
+      holisticRef.current = holistic;
 
       const camera = new CameraClass(videoRef.current, {
         onFrame: async () => {
@@ -227,6 +345,7 @@ export default function LibrasTranslator() {
       });
 
       camera.start();
+      cameraRef.current = camera;
       setIsCameraActive(true);
       setErrorMsg(null);
     } catch (err) {

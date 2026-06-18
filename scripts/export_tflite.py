@@ -1,14 +1,18 @@
+"""
+⚠️ DEPRECADO: Este script é mantido apenas para re-exportação standalone de modelos .h5.
+A exportação TFLite agora é feita automaticamente no final de `train_model.py`.
+Use este script apenas se precisar reconverter um modelo .h5 existente com
+configurações diferentes de quantização.
+"""
 import os
 import tensorflow as tf
 from pathlib import Path
 import numpy as np
+from common import get_base_dir, FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME
 
-MODEL_DIR = Path("../models")
-PROCESSED_DIR = Path("../processed_data")
-
-# Parâmetros
-FRAMES = 30
-FEATURES = 159
+BASE_DIR = get_base_dir()
+MODEL_DIR = BASE_DIR / "client" / "public" / "models"
+FEATURES_DIR = BASE_DIR / "datasets" / "features"
 
 def representative_dataset_gen():
     """
@@ -25,33 +29,30 @@ def representative_dataset_gen():
     """
     from glob import glob
     # Pega uma amostra de 100 sequencias para calibração
-    search_pattern = str(PROCESSED_DIR / "**" / "*.npy")
-    npy_files = glob(search_pattern, recursive=True)[:100]
+    search_pattern = str(FEATURES_DIR / "**" / "*.npy")
+    npy_files = [f for f in glob(search_pattern, recursive=True) if "_aug_" not in f][:100]
     
     for file_path in npy_files:
         data = np.load(file_path)
-        if data.shape == (FRAMES, FEATURES):
+        if data.shape == (FRAMES_PER_SEQUENCE, FEATURES_PER_FRAME):
             # Formato de entrada esperado pela rede: (batch_size, frames, features)
-            # Para TFLite o cast pra float32 é recomendado
             data = data.astype(np.float32)
             data = np.expand_dims(data, axis=0) 
             yield [data]
 
 def main():
     """
-    Ponto de entrada do script.
+    Ponto de entrada do script de re-exportação standalone.
     
-    Este script é o passo final no pipeline de Machine Learning, onde o modelo pesado (.h5) 
-    treinado via Keras é reduzido e empacotado para o formato TensorFlow Lite (.tflite), 
-    visando sua integração direta no Frontend React com o módulo `@tensorflow/tfjs-tflite`.
+    Carrega um modelo Keras (.h5) salvo e converte para TensorFlow Lite (.tflite).
+    Aplica Dynamic Range Quantization via `tf.lite.Optimize.DEFAULT`.
     
-    Ele carrega o modelo Keras e aplica a classe `TFLiteConverter` otimizando os pesos 
-    pela heurística `tf.lite.Optimize.DEFAULT` (Dynamic Range Quantization). Caso o fallback seja 
-    ativado, ele garantirá que o frontend conseguirá ler usando `TFLITE_BUILTINS`.
+    NOTA: A exportação principal agora é feita em `train_model.py` ao final do treinamento.
     """
     model_path = MODEL_DIR / "best_model.h5"
     if not model_path.exists():
         print(f"Modelo não encontrado: {model_path}")
+        print("Dica: O modelo é salvo automaticamente por train_model.py em client/public/models/")
         return
         
     print(f"Carregando modelo {model_path}...")
@@ -62,14 +63,10 @@ def main():
     
     # Otimizações gerais de quantização
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    converter.target_spec.supported_types = [tf.float32]
     
-    # Dataset representativo para calibração de pesos INT8
+    # Dataset representativo para calibração de pesos INT8 (desabilitado por padrão)
     # converter.representative_dataset = representative_dataset_gen
-    
-    # Forçar operações para INT8 se necessário, mas para LSTM pode ser complicado.
-    # converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-    # converter.inference_input_type = tf.int8
-    # converter.inference_output_type = tf.int8
     
     try:
         tflite_model = converter.convert()
